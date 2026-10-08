@@ -1,0 +1,93 @@
+[
+ {
+  "token": "google-chrome",
+  "version": "154.0.8037.98",
+  "auto_updates": true,
+  "url": "https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg",
+  "homepage": "https://www.google.com/chrome/",
+  "artifacts": [
+   {
+    "app": [
+     "Google Chrome.app"
+    ]
+   },
+   {
+    "zap": [
+     {
+      "trash": [
+       "~/Library/Preferences/com.google.Chrome.plist",
+       "~/Library/Caches/Google/Chrome"
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "token": "prusaslicer",
+  "version": "2.9.6",
+  "artifacts": [
+   {
+    "app": [
+     "Original Prusa Drivers/PrusaSlicer.app",
+     {
+      "target": "/Applications/PrusaSlicer.app"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "token": "balenaetcher",
+  "version": "2.1.7",
+  "artifacts": [
+   {
+    "uninstall": [
+     {
+      "quit": "io.balena.etcher"
+     }
+    ]
+   },
+   {
+    "app": [
+     "balenaEtcher.app"
+    ],
+    "target": "/Applications/balenaEtcher.app"
+   }
+  ]
+ },
+ {
+  "token": "nightly-thing",
+  "version": "latest",
+  "artifacts": [
+   {
+    "app": [
+     "Nightly.app"
+    ]
+   }
+  ]
+ },
+ {
+  "token": "font-something",
+  "version": "1.0",
+  "artifacts": [
+   {
+    "font": [
+     "Something.ttf"
+    ]
+   }
+  ]
+ },
+ {
+  "token": "old-disabled",
+  "version": "1.0",
+  "disabled": true,
+  "artifacts": [
+   {
+    "app": [
+     "Old.app"
+    ]
+   }
+  ]
+ }
+]
