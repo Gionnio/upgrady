@@ -85,12 +85,23 @@ enum Background {
         DispatchQueue.main.async { updateActivationPolicy() }
     }
 
-    /// Relaunches Upgrady, e.g. after changing the language.
+    private static var relaunchRequested: Date?
+    private static var relaunchObserver: NSObjectProtocol?
+
+    /// Relaunches Upgrady, e.g. after changing the language. The new instance is opened only
+    /// once this one has really quit, so two copies never stay open.
     static func relaunch() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
-        try? process.run()
+        relaunchRequested = Date()
+        if relaunchObserver == nil {
+            relaunchObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+                guard let asked = relaunchRequested, Date().timeIntervalSince(asked) < 120 else { return }
+                let pid = ProcessInfo.processInfo.processIdentifier
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/sh")
+                process.arguments = ["-c", "while /bin/kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
+                try? process.run()
+            }
+        }
         quitCompletely()
     }
 
