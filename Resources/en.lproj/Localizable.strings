@@ -149,3 +149,5 @@
 "brew path" = "brew path";
 "macOS did not allow Homebrew to change the app. Allow Upgrady in Privacy & Security → App Management." = "macOS did not allow Homebrew to change the app. Allow Upgrady in Privacy & Security → App Management.";
 "Upgrady lets you know when a new version is out." = "Upgrady lets you know when a new version is out.";
+"Homebrew stopped making progress and was stopped. Try again." = "Homebrew stopped making progress and was stopped. Try again.";
+"The update stopped making progress. Try again." = "The update stopped making progress. Try again.";

@@ -322,7 +322,7 @@ private struct SupportRow: View {
     let status: AppStatus
 
     var body: some View {
-        let level = status.source.supportLevel
+        let level = status.supportLevel
         HStack(alignment: explanation == nil ? .center : .top, spacing: 8) {
             Image(systemName: level.symbol).foregroundStyle(level.color).frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
@@ -340,9 +340,6 @@ private struct SupportRow: View {
 
     /// A short note only where the title alone is not enough.
     private var explanation: LocalizedStringKey? {
-        switch status.source {
-        case .homebrewAvailable: "Upgrady lets you know when a new version is out."
-        default: nil
-        }
+        status.supportLevel == .notice ? "Upgrady lets you know when a new version is out." : nil
     }
 }

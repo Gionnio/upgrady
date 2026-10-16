@@ -23,6 +23,10 @@ final class SparkleUpdate: NSObject {
     private var receivedLength: UInt64 = 0
     private var cancelDownload: (() -> Void)?
     private var isDone = false
+    private var lastActivity = Date()
+    private var watchdog: Timer?
+    /// Without any sign of progress for this long, the update is given up.
+    private let stallTimeout: TimeInterval = 300
 
     init(app: InstalledApp, feed: URL?, onEvent: @escaping (Event) -> Void) {
         self.app = app
@@ -43,8 +47,21 @@ final class SparkleUpdate: NSObject {
             finish(.failed(error.localizedDescription))
             return
         }
-        onEvent(.preparing)
+        report(.preparing)
+        watchdog = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.isDone, Date().timeIntervalSince(self.lastActivity) > self.stallTimeout else { return }
+                self.cancelDownload?()
+                self.finish(.failed(String(localized: "The update stopped making progress. Try again.")))
+            }
+        }
         updater.checkForUpdates()
+    }
+
+    /// Passes an event on and notes that the update is alive.
+    private func report(_ event: Event) {
+        lastActivity = Date()
+        onEvent(event)
     }
 
     func cancel() {
@@ -55,6 +72,8 @@ final class SparkleUpdate: NSObject {
     private func finish(_ event: Event) {
         guard !isDone else { return }
         isDone = true
+        watchdog?.invalidate()
+        watchdog = nil
         onEvent(event)
         updater = nil
     }
@@ -94,7 +113,7 @@ extension SparkleUpdate: SPUUserDriver {
     nonisolated func showDownloadInitiated(cancellation: @escaping () -> Void) {
         MainActor.assumeIsolated {
             cancelDownload = cancellation
-            onEvent(.downloading(0))
+            report(.downloading(0))
         }
     }
 
@@ -108,23 +127,33 @@ extension SparkleUpdate: SPUUserDriver {
     nonisolated func showDownloadDidReceiveData(ofLength length: UInt64) {
         MainActor.assumeIsolated {
             receivedLength += length
+            lastActivity = Date()
             guard expectedLength > 0 else { return }
-            onEvent(.downloading(min(Double(receivedLength) / Double(expectedLength), 1)))
+            report(.downloading(min(Double(receivedLength) / Double(expectedLength), 1)))
         }
     }
 
     nonisolated func showDownloadDidStartExtractingUpdate() {
-        MainActor.assumeIsolated { onEvent(.installing) }
+        MainActor.assumeIsolated { report(.installing) }
     }
 
-    nonisolated func showExtractionReceivedProgress(_ progress: Double) {}
+    nonisolated func showExtractionReceivedProgress(_ progress: Double) {
+        MainActor.assumeIsolated { lastActivity = Date() }
+    }
 
     nonisolated func showReady(toInstallAndRelaunch reply: @escaping (SPUUserUpdateChoice) -> Void) {
         reply(.install)
     }
 
     nonisolated func showInstallingUpdate(withApplicationTerminated applicationTerminated: Bool, retryTerminatingApplication: @escaping () -> Void) {
-        MainActor.assumeIsolated { onEvent(.installing) }
+        MainActor.assumeIsolated {
+            report(.installing)
+            // Sparkle installs only once the app has quit; left open, the update would wait for hours.
+            // Quit it (as for Homebrew updates) and Sparkle opens it again when it is done.
+            guard !applicationTerminated else { return }
+            NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleIdentifier).forEach { $0.terminate() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { retryTerminatingApplication() }
+        }
     }
 
     nonisolated func showUpdateInstalledAndRelaunched(_ relaunched: Bool, acknowledgement: @escaping () -> Void) {

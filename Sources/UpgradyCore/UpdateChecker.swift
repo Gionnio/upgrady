@@ -66,6 +66,7 @@ public struct UpdateChecker: Sendable {
             status.available = item.version
             status.decision = item.isInformationalOnly ? .unknown : UpdateDecision.compare(installed: status.app.version, available: item.version)
             status.releaseDate = item.date
+            status.installsItself = item.isPackage
             if let html = item.description() {
                 status.notes = .html(html)
             } else if let page = item.releaseNotesURL ?? item.fullReleaseNotesURL {

@@ -33,4 +33,16 @@ final class AppcastTests: XCTestCase {
         XCTAssertEqual(UpdateDecision.compare(installed: AppVersion(display: "3.0", build: "300"), available: newest.version), .updateAvailable)
         XCTAssertEqual(UpdateDecision.compare(installed: AppVersion(display: "3.1", build: "310"), available: newest.version), .upToDate)
     }
+
+    func testInstallerPackagesAreRecognised() {
+        let xml = """
+        <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel>
+        <item><title>2.0</title><enclosure url="https://example.com/App.zip" sparkle:version="20" sparkle:shortVersionString="2.0" sparkle:installationType="package"/></item>
+        <item><title>1.9</title><enclosure url="https://example.com/App-1.9.pkg" sparkle:version="19"/></item>
+        <item><title>1.8</title><enclosure url="https://example.com/App-1.8.zip" sparkle:version="18"/></item>
+        </channel></rss>
+        """
+        let items = Appcast.parse(Data(xml.utf8))
+        XCTAssertEqual(items.map(\.isPackage), [true, true, false])
+    }
 }

@@ -9,6 +9,11 @@ enum OperationState: Equatable {
     case downloading(Double)
     case installing
     case failed(String)
+
+    /// Waiting or running; a failed operation only waits for Retry.
+    var isInProgress: Bool {
+        if case .failed = self { false } else { true }
+    }
 }
 
 /// Keeps the list of apps, runs checks and performs updates.
@@ -29,13 +34,21 @@ final class UpdateCenter: ObservableObject {
     private let preferences = Preferences.shared
     private var sparkleUpdates: [URL: SparkleUpdate] = [:]
     private var queue: [AppStatus] = []
+    /// Sparkle updates in progress.
     private var running = 0
+    /// All updates in progress.
+    private var active = 0
     private let maximumParallelUpdates = 2
     private var scheduleTimer: Timer?
     private lazy var folderWatcher = FolderWatcher { [weak self] in
         Task { @MainActor in await self?.appsChanged() }
     }
     private var passwordPrompt: URL?
+    /// One brew command at a time: checks, updates and adoptions wait for each other.
+    private var brewBusy = false
+    private var brewWaiters: [CheckedContinuation<Void, Never>] = []
+    /// A brew command with no output and no download progress for this long is stopped.
+    private let brewStallTimeout: TimeInterval = 300
 
     private var cacheDirectory: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -73,7 +86,8 @@ final class UpdateCenter: ObservableObject {
     /// Whether Upgrady can install the update itself.
     func canUpdateInApp(_ status: AppStatus) -> Bool {
         switch status.source {
-        case .homebrew, .sparkle: true
+        case .homebrew: true
+        case .sparkle: !status.installsItself
         default: false
         }
     }
@@ -87,8 +101,12 @@ final class UpdateCenter: ObservableObject {
         defer { isChecking = false }
 
         let homebrew = preferences.homebrew
+        ActivityLog.write("Check started\(refreshingHomebrew ? " (with brew update)" : "")")
         if refreshingHomebrew, let homebrew {
-            _ = await runner(for: homebrew).run(["update"])
+            await acquireBrew()
+            let output = await runner(for: homebrew).run(["update"], watchdog: BrewWatchdog(timeout: brewStallTimeout))
+            releaseBrew()
+            if !output.succeeded { ActivityLog.write("brew update failed (status \(output.status)\(output.stalled ? ", stalled" : ""))") }
         }
 
         var folders = AppScanner.defaultFolders + preferences.extraFolders
@@ -104,6 +122,7 @@ final class UpdateCenter: ObservableObject {
         lastCheck = result.date
         UserDefaults.standard.set(result.date, forKey: "lastCheck")
         notifyAboutNewUpdates(previous: previous)
+        ActivityLog.write("Check finished: \(statuses.count) apps, \(updates.count) updates")
     }
 
     /// Runs scheduled checks according to Settings. Also checks at launch.
@@ -120,13 +139,13 @@ final class UpdateCenter: ObservableObject {
     /// Apps were installed, updated or removed: refresh the list (without `brew update`).
     private func appsChanged() async {
         // During updates the list is refreshed when they are done.
-        guard !isChecking, operations.isEmpty, adoptions.isEmpty else { return }
+        guard !isChecking, !hasOperationsInProgress, !adoptions.values.contains(where: \.isInProgress) else { return }
         await check(refreshingHomebrew: false)
     }
 
     private func checkIfDue() async {
         let interval = TimeInterval(preferences.checkInterval.rawValue)
-        guard interval > 0, !isChecking, operations.isEmpty else { return }
+        guard interval > 0, !isChecking, !hasOperationsInProgress else { return }
         if let lastCheck, Date().timeIntervalSince(lastCheck) < interval { return }
         await check()
     }
@@ -137,8 +156,16 @@ final class UpdateCenter: ObservableObject {
         switch status.source {
         case .appStore:
             NSWorkspace.shared.open(URL(string: "macappstore://showUpdatesPage")!)
+        case .sparkle where status.installsItself:
+            // An installer package: the app installs it itself once opened.
+            ActivityLog.write("\(status.app.name) updates itself (installer package): opening it")
+            NSWorkspace.shared.openApplication(at: status.app.url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
         case .homebrew, .sparkle:
-            guard operations[status.id] == nil else { return }
+            guard operations[status.id] == nil else {
+                ActivityLog.write("Update of \(status.app.name) already in progress (\(String(describing: operations[status.id]!)))")
+                return
+            }
+            ActivityLog.write("Update of \(status.app.name) queued")
             operations[status.id] = .queued
             queue.append(status)
             startNext()
@@ -148,7 +175,9 @@ final class UpdateCenter: ObservableObject {
     }
 
     func updateAll() {
-        updates.filter(canUpdateInApp).forEach(update)
+        let apps = updates.filter(canUpdateInApp)
+        ActivityLog.write("Update All: \(apps.map(\.app.name).joined(separator: ", "))")
+        apps.forEach(update)
     }
 
     func cancel(_ status: AppStatus) {
@@ -163,20 +192,35 @@ final class UpdateCenter: ObservableObject {
         if case .failed = operations[status.id] { operations[status.id] = nil }
     }
 
+    /// Starts queued updates. Homebrew updates start right away and wait for each other on the brew lane;
+    /// Sparkle updates run at most `maximumParallelUpdates` at a time. The two never hold each other up.
     private func startNext() {
-        while running < maximumParallelUpdates, !queue.isEmpty {
-            let status = queue.removeFirst()
-            running += 1
+        var index = 0
+        while index < queue.count {
+            let status = queue[index]
+            let isHomebrew = if case .homebrew = status.source { true } else { false }
+            guard isHomebrew || running < maximumParallelUpdates else {
+                index += 1
+                continue
+            }
+            queue.remove(at: index)
+            if !isHomebrew { running += 1 }
+            active += 1
             Task {
+                let started = Date()
                 let failure = await perform(status)
-                running -= 1
+                if !isHomebrew { running -= 1 }
+                active -= 1
+                let seconds = Int(Date().timeIntervalSince(started))
                 if let failure {
+                    ActivityLog.write("Update of \(status.app.name) failed after \(seconds)s: \(failure)")
                     operations[status.id] = .failed(failure)
                 } else {
+                    ActivityLog.write("Update of \(status.app.name) finished in \(seconds)s")
                     operations[status.id] = nil
                 }
                 startNext()
-                if queue.isEmpty && running == 0 {
+                if queue.isEmpty && active == 0 {
                     await check(refreshingHomebrew: false)
                 }
             }
@@ -185,9 +229,10 @@ final class UpdateCenter: ObservableObject {
 
     /// Performs one update. Returns an error message, or nil on success.
     private func perform(_ status: AppStatus) async -> String? {
-        operations[status.id] = .preparing
         switch status.source {
         case .sparkle(let feed):
+            operations[status.id] = .preparing
+            ActivityLog.write("Sparkle update of \(status.app.name) started")
             return await withCheckedContinuation { continuation in
                 let update = SparkleUpdate(app: status.app, feed: feed) { [weak self] event in
                     guard let self else { return }
@@ -208,20 +253,30 @@ final class UpdateCenter: ObservableObject {
             }
         case .homebrew(let name):
             guard let homebrew = preferences.homebrew else { return String(localized: "Homebrew was not found.") }
+            // Waits here, shown as queued, while another brew command runs.
+            await acquireBrew()
+            defer { releaseBrew() }
+            operations[status.id] = .preparing
+            ActivityLog.write("brew upgrade --cask \(name) started")
             let runner = runner(for: homebrew)
             let wasRunning = quitRunningApp(status.app)
+            let watchdog = BrewWatchdog(timeout: brewStallTimeout)
             let progress = status.cask.map { cask in
-                CaskDownloadProgress(runner: runner, cask: cask) { fraction in
+                CaskDownloadProgress(runner: runner, cask: cask, watchdog: watchdog) { fraction in
                     Task { @MainActor in
                         UpdateCenter.shared.operations[status.id] = fraction >= 1 ? .installing : .downloading(fraction)
                     }
                 }
             }
             progress?.start()
-            let output = await runner.run(["upgrade", "--cask", name]) { [weak self] text in
+            let output = await runner.run(["upgrade", "--cask", name], watchdog: watchdog) { [weak self] text in
                 Task { @MainActor in self?.brewLog += text }
             }
             progress?.stop()
+            ActivityLog.write("brew upgrade --cask \(name) ended with status \(output.status)\(output.stalled ? " (stopped: no progress for \(Int(brewStallTimeout))s)" : "")")
+            if !output.succeeded {
+                ActivityLog.write("brew output:\n" + output.text.split(separator: "\n").suffix(20).joined(separator: "\n"))
+            }
             if wasRunning {
                 NSWorkspace.shared.openApplication(at: status.app.url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
             }
@@ -233,6 +288,9 @@ final class UpdateCenter: ObservableObject {
 
     private func failureMessage(for output: BrewRunner.Output) -> String? {
         guard !output.succeeded else { return nil }
+        if output.stalled {
+            return String(localized: "Homebrew stopped making progress and was stopped. Try again.")
+        }
         if output.lacksAppManagementPermission {
             needsAppManagementPermission = true
             return String(localized: "macOS did not allow Homebrew to change the app. Allow Upgrady in Privacy & Security → App Management.")
@@ -277,6 +335,7 @@ final class UpdateCenter: ObservableObject {
         guard let homebrew = preferences.homebrew else { return }
         let runner = runner(for: homebrew)
         candidates.forEach { adoptions[$0.id] = .queued }
+        await acquireBrew()
         for candidate in candidates {
             if candidate.needsTrust {
                 brewLog += "$ brew trust --cask \(candidate.cask.qualifiedName)\n"
@@ -285,18 +344,21 @@ final class UpdateCenter: ObservableObject {
             adoptions[candidate.id] = .preparing
             let arguments = ["install", "--cask", reinstall ? "--force" : "--adopt", candidate.cask.qualifiedName]
             brewLog += "$ brew \(arguments.joined(separator: " "))\n"
-            let progress = CaskDownloadProgress(runner: runner, cask: candidate.cask) { fraction in
+            let watchdog = BrewWatchdog(timeout: brewStallTimeout)
+            let progress = CaskDownloadProgress(runner: runner, cask: candidate.cask, watchdog: watchdog) { fraction in
                 Task { @MainActor in
                     UpdateCenter.shared.adoptions[candidate.id] = fraction >= 1 ? .installing : .downloading(fraction)
                 }
             }
             progress.start()
-            let output = await runner.run(arguments) { [weak self] text in
+            let output = await runner.run(arguments, watchdog: watchdog) { [weak self] text in
                 Task { @MainActor in self?.brewLog += text }
             }
             progress.stop()
+            ActivityLog.write("brew \(arguments.joined(separator: " ")) ended with status \(output.status)\(output.stalled ? " (stalled)" : "")")
             adoptions[candidate.id] = output.succeeded ? nil : .failed(failureMessage(for: output) ?? "")
         }
+        releaseBrew()
         await check(refreshingHomebrew: false)
     }
 
@@ -306,6 +368,28 @@ final class UpdateCenter: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Updates waiting or running. Failed ones only wait for Retry and must not hold up checks.
+    private var hasOperationsInProgress: Bool {
+        operations.values.contains(where: \.isInProgress)
+    }
+
+    private func acquireBrew() async {
+        guard brewBusy else {
+            brewBusy = true
+            return
+        }
+        await withCheckedContinuation { brewWaiters.append($0) }
+    }
+
+    /// Hands brew to the next waiting command, if any.
+    private func releaseBrew() {
+        if brewWaiters.isEmpty {
+            brewBusy = false
+        } else {
+            brewWaiters.removeFirst().resume()
+        }
+    }
 
     private func runner(for homebrew: HomebrewInstallation) -> BrewRunner {
         if passwordPrompt == nil {

@@ -14,7 +14,9 @@ public struct BrewRunner: Sendable {
     public struct Output: Sendable {
         public let status: Int32
         public let text: String
-        public var succeeded: Bool { status == 0 }
+        /// Brew stopped making progress and was stopped by the watchdog.
+        public var stalled = false
+        public var succeeded: Bool { status == 0 && !stalled }
 
         /// macOS refused to let brew change an app: the "App Management" permission is missing.
         public var lacksAppManagementPermission: Bool { text.contains("Operation not permitted") }
@@ -23,7 +25,12 @@ public struct BrewRunner: Sendable {
     }
 
     /// Runs brew and waits for it. `onOutput` receives output as it arrives.
-    public func run(_ arguments: [String], includeErrors: Bool = true, onOutput: (@Sendable (String) -> Void)? = nil) async -> Output {
+    ///
+    /// With a `watchdog`, brew is stopped when it shows no sign of life (no output, no download progress)
+    /// for the watchdog's timeout: a download left hanging, for example after the Mac slept, would otherwise
+    /// keep the operation running for hours.
+    public func run(_ arguments: [String], includeErrors: Bool = true, watchdog: BrewWatchdog? = nil,
+                    onOutput: (@Sendable (String) -> Void)? = nil) async -> Output {
         await withCheckedContinuation { continuation in
             let process = Process()
             process.executableURL = installation.brewURL
@@ -39,24 +46,57 @@ public struct BrewRunner: Sendable {
             pipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
+                watchdog?.touch()
                 collected.append(data)
                 onOutput?(String(decoding: data, as: UTF8.self))
             }
             process.terminationHandler = { process in
+                watchdog?.stop()
                 pipe.fileHandleForReading.readabilityHandler = nil
-                let rest = pipe.fileHandleForReading.readDataToEndOfFile()
+                // After a stall a leftover child (curl) may still hold the pipe open: do not wait for it.
+                let rest = watchdog?.fired == true ? Data() : pipe.fileHandleForReading.readDataToEndOfFile()
                 if !rest.isEmpty {
                     collected.append(rest)
                     onOutput?(String(decoding: rest, as: UTF8.self))
                 }
-                continuation.resume(returning: Output(status: process.terminationStatus, text: collected.text))
+                var output = Output(status: process.terminationStatus, text: collected.text)
+                output.stalled = watchdog?.fired ?? false
+                continuation.resume(returning: output)
             }
             do {
                 try process.run()
+                let pid = process.processIdentifier
+                watchdog?.start {
+                    // brew runs the download in child processes: stop them too, then brew itself.
+                    Self.signalChildren(of: pid, "TERM")
+                    process.terminate()
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+                        guard process.isRunning else { return }
+                        Self.signalChildren(of: pid, "KILL")
+                        kill(pid, SIGKILL)
+                    }
+                }
             } catch {
                 pipe.fileHandleForReading.readabilityHandler = nil
                 continuation.resume(returning: Output(status: -1, text: error.localizedDescription))
             }
+        }
+    }
+
+    /// Sends a signal to the children of a process (and theirs), with `pkill -P`.
+    private static func signalChildren(of pid: Int32, _ signal: String) {
+        let children = Process()
+        children.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        children.arguments = ["-P", String(pid)]
+        let pipe = Pipe()
+        children.standardOutput = pipe
+        children.standardError = FileHandle.nullDevice
+        guard (try? children.run()) != nil else { return }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        children.waitUntilExit()
+        for child in String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap({ Int32($0) }) {
+            signalChildren(of: child, signal)
+            kill(child, signal == "KILL" ? SIGKILL : SIGTERM)
         }
     }
 
@@ -91,6 +131,50 @@ public struct BrewRunner: Sendable {
     }
 }
 
+/// Stops a brew command that shows no sign of life for `timeout` seconds.
+public final class BrewWatchdog: @unchecked Sendable {
+    public let timeout: TimeInterval
+    private let lock = NSLock()
+    private var lastActivity = Date()
+    private var timer: DispatchSourceTimer?
+    private var didFire = false
+
+    public init(timeout: TimeInterval) {
+        self.timeout = timeout
+    }
+
+    /// Brew is alive: output arrived or the download grew.
+    public func touch() { lock.withLock { lastActivity = Date() } }
+
+    /// Whether the command was stopped for inactivity.
+    public var fired: Bool { lock.withLock { didFire } }
+
+    func start(onStall: @escaping @Sendable () -> Void) {
+        touch()
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        let tick = min(15, max(timeout / 4, 0.5))
+        timer.schedule(deadline: .now() + tick, repeating: tick)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let stalled = self.lock.withLock { () -> Bool in
+                guard !self.didFire, Date().timeIntervalSince(self.lastActivity) > self.timeout else { return false }
+                self.didFire = true
+                return true
+            }
+            if stalled { onStall() }
+        }
+        lock.withLock { self.timer = timer }
+        timer.resume()
+    }
+
+    func stop() {
+        lock.withLock {
+            timer?.cancel()
+            timer = nil
+        }
+    }
+}
+
 private final class OutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
@@ -107,23 +191,31 @@ public final class CaskDownloadProgress: @unchecked Sendable {
     private let runner: BrewRunner
     private let cask: Cask
     private let handler: Handler
+    private let watchdog: BrewWatchdog?
     private var task: Task<Void, Never>?
 
-    public init(runner: BrewRunner, cask: Cask, handler: @escaping Handler) {
+    /// A growing download counts as activity for the `watchdog`.
+    public init(runner: BrewRunner, cask: Cask, watchdog: BrewWatchdog? = nil, handler: @escaping Handler) {
         self.runner = runner
         self.cask = cask
+        self.watchdog = watchdog
         self.handler = handler
     }
 
     public func start() {
-        task = Task.detached { [runner, cask, handler] in
+        task = Task.detached { [runner, cask, handler, watchdog] in
             let cachePath = await runner.run(["--cache", "--cask", cask.qualifiedName], includeErrors: false).text
                 .split(separator: "\n").last(where: { $0.hasPrefix("/") }).map(String.init)
             guard let cachePath, let total = await Self.expectedSize(of: cask), total > 0 else { return }
             let partial = cachePath + ".incomplete"
             var lastReported = -1.0
+            var lastSize: Int64 = -1
             while !Task.isCancelled {
                 if let size = (try? FileManager.default.attributesOfItem(atPath: partial))?[.size] as? NSNumber {
+                    if size.int64Value != lastSize {
+                        lastSize = size.int64Value
+                        watchdog?.touch()
+                    }
                     let fraction = min(Double(size.int64Value) / Double(total), 1)
                     if fraction - lastReported >= 0.005 {
                         lastReported = fraction

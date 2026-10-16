@@ -33,6 +33,8 @@ public struct AppStatus: Identifiable, Hashable, Sendable {
     public var releaseDate: Date?
     /// The cask behind a Homebrew source, needed to update or adopt the app.
     public var cask: Cask?
+    /// The update can only be installed by the app itself (a Sparkle installer package).
+    public var installsItself = false
 
     public var id: URL { app.id }
     public var updateAvailable: Bool { decision.isUpdate }

@@ -95,6 +95,8 @@ cd upgrady
 
 The script downloads Sparkle (pinned version, verified checksum), builds a universal app, signs it locally and installs it. Run the tests with `swift test`.
 
+Optional: run `tools/create_signing_certificate.sh` once to create a local self-signed certificate. Builds signed with it keep the same signature, so macOS remembers permissions such as App Management across updates; without it the app is signed ad hoc.
+
 ## 🚧 Roadmap & TODO
 
 * [x] **Menu bar app** with background checks and notifications.

@@ -21,6 +21,15 @@ public struct AppcastItem: Hashable, Sendable {
     public var downloadURL: URL?
     /// Operating system of the download; nil means macOS.
     public var operatingSystem: String?
+    /// `sparkle:installationType`: nil or "application" for a plain app, "package" or "interactive-package" for an installer.
+    public var installationType: String?
+
+    /// The update is an installer package. Sparkle installs those only with a helper signed by the app's own
+    /// developer, so another app (like Upgrady) cannot install them: the app has to update itself.
+    public var isPackage: Bool {
+        if let installationType, installationType.contains("package") { return true }
+        return ["pkg", "mpkg"].contains(downloadURL?.pathExtension.lowercased() ?? "")
+    }
 
     public var version: AppVersion { AppVersion(display: shortVersion ?? build, build: build) }
 
@@ -89,6 +98,7 @@ private final class FeedReader: NSObject, XMLParserDelegate {
             item.build = item.build ?? attributes["sparkle:version"]
             item.shortVersion = item.shortVersion ?? attributes["sparkle:shortVersionString"]
             item.operatingSystem = attributes["sparkle:os"]
+            item.installationType = attributes["sparkle:installationType"]
             current = item
         case "sparkle:criticalUpdate":
             current?.isCritical = true

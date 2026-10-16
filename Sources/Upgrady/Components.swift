@@ -53,6 +53,13 @@ enum SupportLevel {
     }
 }
 
+extension AppStatus {
+    /// What Upgrady can do for this app: like its source, except for updates only the app can install.
+    var supportLevel: SupportLevel {
+        installsItself ? .notice : source.supportLevel
+    }
+}
+
 extension UpdateSource {
     var supportLevel: SupportLevel {
         switch self {
@@ -158,6 +165,7 @@ struct UpdateCapsule: View {
     private var title: LocalizedStringKey {
         switch status.source {
         case .appStore: "App Store"
+        case .sparkle where status.installsItself: "Open"
         case .homebrew, .sparkle: "Update"
         default: "Open"
         }

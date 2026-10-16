@@ -11,8 +11,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 BUILD="$ROOT/build"
-VERSION="2.0.1"
-BUILD_NUMBER="2"
+VERSION="2.0.2"
+BUILD_NUMBER="3"
 BETA="${BETA:-0}"
 if [ "$BETA" = "1" ]; then
     NAME="Upgrady Beta"; BUNDLE_ID="com.github.gionnio.Upgrady.beta"
@@ -81,10 +81,20 @@ if [ -d "$ROOT/icon/AppIcon.iconset" ]; then
     /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist"
 fi
 
-# Firma ad-hoc di tutto il pacchetto (Sparkle e i suoi helper compresi), poi l'app con il suo identificativo.
-# Niente runtime protetto: con firme ad-hoc impedirebbe all'app di caricare Sparkle (serve solo per la notarizzazione).
-codesign --force --deep --sign - "$APP"
-codesign --force --identifier "$BUNDLE_ID" --sign - "$APP"
+# Firma di tutto il pacchetto (Sparkle e i suoi helper compresi), poi l'app con il suo identificativo.
+# Con il certificato creato da tools/create_signing_certificate.sh la firma resta uguale tra una versione e l'altra,
+# così macOS ricorda i permessi (es. Gestione app) dopo gli aggiornamenti; senza, firma ad-hoc.
+# Niente runtime protetto: senza un Team ID impedirebbe all'app di caricare Sparkle (serve solo per la notarizzazione).
+SIGN_IDENTITY="${SIGN_IDENTITY:-Gionnio Code Signing}"
+if security find-identity -p codesigning | grep -q "\"$SIGN_IDENTITY\""; then
+    SIGN="$SIGN_IDENTITY"
+else
+    SIGN="-"
+    echo "⚠️  Certificato \"$SIGN_IDENTITY\" non trovato: firma ad-hoc (i permessi di macOS andranno concessi di nuovo dopo ogni build)."
+fi
+codesign --force --deep --sign "$SIGN" "$APP"
+codesign --force --identifier "$BUNDLE_ID" --sign "$SIGN" "$APP"
+codesign --verify --deep --strict "$APP"
 touch "$APP"
 echo "✅ $APP"
 
