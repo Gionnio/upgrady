@@ -49,6 +49,10 @@ final class UpdateCenter: ObservableObject {
     private var brewWaiters: [CheckedContinuation<Void, Never>] = []
     /// A brew command with no output and no download progress for this long is stopped.
     private let brewStallTimeout: TimeInterval = 300
+    /// Last successful `brew update`. Upgrades refresh brew first when it is older than `brewFreshness`,
+    /// so brew knows the versions Upgrady shows (they come from the online catalog, refreshed hourly).
+    private var lastBrewUpdate: Date?
+    private let brewFreshness: TimeInterval = 600
 
     private var cacheDirectory: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -104,9 +108,8 @@ final class UpdateCenter: ObservableObject {
         ActivityLog.write("Check started\(refreshingHomebrew ? " (with brew update)" : "")")
         if refreshingHomebrew, let homebrew {
             await acquireBrew()
-            let output = await runner(for: homebrew).run(["update"], watchdog: BrewWatchdog(timeout: brewStallTimeout))
+            await updateBrew(runner(for: homebrew))
             releaseBrew()
-            if !output.succeeded { ActivityLog.write("brew update failed (status \(output.status)\(output.stalled ? ", stalled" : ""))") }
         }
 
         var folders = AppScanner.defaultFolders + preferences.extraFolders
@@ -257,8 +260,11 @@ final class UpdateCenter: ObservableObject {
             await acquireBrew()
             defer { releaseBrew() }
             operations[status.id] = .preparing
-            ActivityLog.write("brew upgrade --cask \(name) started")
             let runner = runner(for: homebrew)
+            if lastBrewUpdate.map({ Date().timeIntervalSince($0) > brewFreshness }) ?? true {
+                await updateBrew(runner)
+            }
+            ActivityLog.write("brew upgrade --cask \(name) started")
             let wasRunning = quitRunningApp(status.app)
             let watchdog = BrewWatchdog(timeout: brewStallTimeout)
             let progress = status.cask.map { cask in
@@ -280,7 +286,14 @@ final class UpdateCenter: ObservableObject {
             if wasRunning {
                 NSWorkspace.shared.openApplication(at: status.app.url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
             }
-            return failureMessage(for: output)
+            if let failure = failureMessage(for: output) { return failure }
+            // brew also succeeds when it finds nothing to upgrade: make sure the app really changed.
+            if let installed = AppScanner.readApp(at: status.app.url), installed.version == status.app.version {
+                ActivityLog.write("brew upgrade --cask \(name) left \(status.app.name) at \(installed.version). brew output:\n"
+                                  + output.text.split(separator: "\n").suffix(10).joined(separator: "\n"))
+                return String(localized: "Homebrew did not install a newer version yet. Try again after the next check.")
+            }
+            return nil
         default:
             return nil
         }
@@ -368,6 +381,17 @@ final class UpdateCenter: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// `brew update`, with the brew lane already held.
+    private func updateBrew(_ runner: BrewRunner) async {
+        let output = await runner.run(["update"], watchdog: BrewWatchdog(timeout: brewStallTimeout))
+        if output.succeeded {
+            lastBrewUpdate = Date()
+            ActivityLog.write("brew update done")
+        } else {
+            ActivityLog.write("brew update failed (status \(output.status)\(output.stalled ? ", stalled" : ""))")
+        }
+    }
 
     /// Updates waiting or running. Failed ones only wait for Retry and must not hold up checks.
     private var hasOperationsInProgress: Bool {

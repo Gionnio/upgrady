@@ -11,8 +11,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 BUILD="$ROOT/build"
-VERSION="2.0.2"
-BUILD_NUMBER="3"
+VERSION="2.0.3"
+BUILD_NUMBER="4"
 BETA="${BETA:-0}"
 if [ "$BETA" = "1" ]; then
     NAME="Upgrady Beta"; BUNDLE_ID="com.github.gionnio.Upgrady.beta"

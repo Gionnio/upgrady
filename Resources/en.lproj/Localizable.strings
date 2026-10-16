@@ -151,3 +151,4 @@
 "Upgrady lets you know when a new version is out." = "Upgrady lets you know when a new version is out.";
 "Homebrew stopped making progress and was stopped. Try again." = "Homebrew stopped making progress and was stopped. Try again.";
 "The update stopped making progress. Try again." = "The update stopped making progress. Try again.";
+"Homebrew did not install a newer version yet. Try again after the next check." = "Homebrew did not install a newer version yet. Try again after the next check.";
