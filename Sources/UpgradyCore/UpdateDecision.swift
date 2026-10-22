@@ -47,6 +47,15 @@ public enum UpdateDecision: Equatable, Sendable {
         let availableDisplay = available.displayNumber
 
         if let installedDisplay, let availableDisplay {
+            // A packaging revision after the version is not a new version: 103.0 vs 103.0-1.
+            if let installedText = installed.display, let availableText = available.display,
+               let dash = availableText.lastIndex(of: "-"),
+               !availableText[availableText.index(after: dash)...].isEmpty,
+               availableText[availableText.index(after: dash)...].allSatisfy(\.isNumber),
+               VersionNumber(String(availableText[..<dash])).map({ VersionNumber.compare(installedDisplay, $0) == .orderedSame }) == true,
+               !installedText.contains("-") {
+                return .upToDate
+            }
             // The build may be appended to the available version: 1.2 (40) vs 1.2.40.
             if let build = installed.buildNumber, appendsBuild(availableDisplay, to: installedDisplay, build: build) {
                 return .upToDate

@@ -88,4 +88,10 @@ final class UpdateDecisionTests: XCTestCase {
     func testUnreadableVersionsAreNotUpdates() {
         XCTAssertFalse(decide(("abc", nil), ("def", nil)).isUpdate)
     }
+
+    func testPackagingRevisionIsNotANewVersion() {
+        XCTAssertEqual(UpdateDecision.compare(installed: AppVersion(display: "103.0", build: "103.0"), available: AppVersion(caskVersion: "103.0-1")), .upToDate)
+        XCTAssertEqual(UpdateDecision.compare(installed: AppVersion(display: "102.0", build: nil), available: AppVersion(caskVersion: "103.0-1")), .updateAvailable)
+        XCTAssertEqual(UpdateDecision.compare(installed: AppVersion(display: "1.2", build: nil), available: AppVersion(display: "1.3-beta", build: nil)), .upToDate)
+    }
 }

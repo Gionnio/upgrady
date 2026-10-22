@@ -115,9 +115,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// Whether an Apple Event was sent by the Dock (its Quit menu item).
+    private static func comesFromDock(_ event: NSAppleEventDescriptor) -> Bool {
+        guard let pid = event.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value, pid > 0 else { return false }
+        return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.dock"
+    }
+
+    /// Quitting stops the updates in progress: ask first. Returns true to quit anyway.
+    private func confirmQuitDuringUpdates() -> Bool {
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = String(localized: "Updates are in progress")
+        alert.informativeText = String(localized: "Quitting Upgrady now stops them.")
+        alert.addButton(withTitle: String(localized: "Keep Updating"))
+        alert.addButton(withTitle: String(localized: "Quit Anyway"))
+        let quit = alert.runModal() == .alertSecondButtonReturn
+        ActivityLog.write(quit ? "Quit during updates confirmed" : "Quit during updates cancelled")
+        return quit
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // Logout, shutdown and other apps quit us via Apple Event: never interfere with those.
-        let isUserQuit = NSAppleEventManager.shared().currentAppleEvent == nil
+        // Logout, shutdown and other apps (brew updating Upgrady, for one) quit us via Apple Event: never interfere
+        // with those. Quit from the Dock menu is an Apple Event too, but it comes from the user.
+        let isUserQuit = NSAppleEventManager.shared().currentAppleEvent.map(Self.comesFromDock) ?? true
+        if isUserQuit, UpdateCenter.shared.hasOperationsInProgress, !confirmQuitDuringUpdates() {
+            return .terminateCancel
+        }
         // Without the menu bar icon there is nothing to keep running in.
         guard isUserQuit, !Background.quitConfirmed, Preferences.shared.showMenuBarIcon else { return .terminateNow }
         switch Preferences.shared.quitBehavior {

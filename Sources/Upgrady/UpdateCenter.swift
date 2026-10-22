@@ -28,6 +28,9 @@ final class UpdateCenter: ObservableObject {
     @Published private(set) var operations: [URL: OperationState] = [:]
     @Published private(set) var adoptions: [String: OperationState] = [:]
     @Published private(set) var brewLog = ""
+    /// Updates requested in the current run and how many of them are done, for "Updating 3 of 13".
+    @Published private(set) var batchTotal = 0
+    @Published private(set) var batchDone = 0
     /// Set when brew failed because macOS blocked it from changing an app.
     @Published var needsAppManagementPermission = false
 
@@ -169,6 +172,7 @@ final class UpdateCenter: ObservableObject {
                 return
             }
             ActivityLog.write("Update of \(status.app.name) queued")
+            batchTotal += 1
             operations[status.id] = .queued
             queue.append(status)
             startNext()
@@ -178,7 +182,28 @@ final class UpdateCenter: ObservableObject {
     }
 
     func updateAll() {
-        let apps = updates.filter(canUpdateInApp)
+        // Apps already queued or updating are left as they are.
+        var apps = updates.filter { canUpdateInApp($0) && operations[$0.id]?.isInProgress != true }
+        // Updating closes open apps (and reopens them): with several at once, ask before closing what the user is using.
+        let open = apps.filter { !NSRunningApplication.runningApplications(withBundleIdentifier: $0.app.bundleIdentifier).isEmpty }
+        if !open.isEmpty {
+            NSApp.activate()
+            let alert = NSAlert()
+            alert.messageText = String(localized: "Some of these apps are open")
+            alert.informativeText = String(localized: "To update them Upgrady closes them and opens them again: \(open.map(\.app.name).formatted(.list(type: .and))).")
+            alert.addButton(withTitle: String(localized: "Update All"))
+            alert.addButton(withTitle: String(localized: "Skip Open Apps"))
+            alert.addButton(withTitle: String(localized: "Cancel")).keyEquivalent = "\u{1b}"
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                break
+            case .alertSecondButtonReturn:
+                let skipped = Set(open.map(\.id))
+                apps.removeAll { skipped.contains($0.id) }
+            default:
+                return
+            }
+        }
         ActivityLog.write("Update All: \(apps.map(\.app.name).joined(separator: ", "))")
         apps.forEach(update)
     }
@@ -215,19 +240,39 @@ final class UpdateCenter: ObservableObject {
                 if !isHomebrew { running -= 1 }
                 active -= 1
                 let seconds = Int(Date().timeIntervalSince(started))
+                batchDone += 1
                 if let failure {
                     ActivityLog.write("Update of \(status.app.name) failed after \(seconds)s: \(failure)")
                     operations[status.id] = .failed(failure)
                 } else {
                     ActivityLog.write("Update of \(status.app.name) finished in \(seconds)s")
                     operations[status.id] = nil
+                    refreshStatus(of: status)
                 }
                 startNext()
                 if queue.isEmpty && active == 0 {
                     await check(refreshingHomebrew: false)
+                    if queue.isEmpty && active == 0 {
+                        batchTotal = 0
+                        batchDone = 0
+                    }
                 }
             }
         }
+    }
+
+    /// Reads an updated app again, so it leaves the list of updates right away instead of at the end of the run.
+    private func refreshStatus(of status: AppStatus) {
+        guard let index = statuses.firstIndex(where: { $0.id == status.id }),
+              let app = AppScanner.readApp(at: status.app.url) else { return }
+        let old = statuses[index]
+        // brew upgraded (and the app changed): up to date by brew's own measure, as in a full check.
+        let decision: UpdateDecision = if case .homebrew = old.source { .upToDate }
+            else { old.available.map { UpdateDecision.compare(installed: app.version, available: $0) } ?? .unknown }
+        var fresh = AppStatus(app: app, source: old.source, available: old.available, decision: decision,
+                              notes: old.notes, releaseDate: old.releaseDate, cask: old.cask)
+        fresh.installsItself = old.installsItself
+        statuses[index] = fresh
     }
 
     /// Performs one update. Returns an error message, or nil on success.
@@ -394,7 +439,7 @@ final class UpdateCenter: ObservableObject {
     }
 
     /// Updates waiting or running. Failed ones only wait for Retry and must not hold up checks.
-    private var hasOperationsInProgress: Bool {
+    var hasOperationsInProgress: Bool {
         operations.values.contains(where: \.isInProgress)
     }
 

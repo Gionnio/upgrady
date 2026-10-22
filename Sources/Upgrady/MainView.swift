@@ -135,6 +135,9 @@ struct MainView: View {
     }
 
     private var subtitle: String {
+        if center.batchTotal > 0 {
+            return String(localized: "Updating \(min(center.batchDone + 1, center.batchTotal)) of \(center.batchTotal)…")
+        }
         if center.isChecking { return String(localized: "Checking…") }
         guard let lastCheck = center.lastCheck else { return "" }
         return String(localized: "Checked \(lastCheck.formatted(.relative(presentation: .named)))")

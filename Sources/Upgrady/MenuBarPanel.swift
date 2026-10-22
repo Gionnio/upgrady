@@ -64,7 +64,9 @@ struct MenuBarPanel: View {
                 Text(center.updates.isEmpty ? "No updates" : "\(center.updates.count) updates")
                     .font(.headline)
                 Group {
-                    if center.isChecking {
+                    if center.batchTotal > 0 {
+                        Text("Updating \(min(center.batchDone + 1, center.batchTotal)) of \(center.batchTotal)…")
+                    } else if center.isChecking {
                         Text("Checking…")
                     } else if let lastCheck = center.lastCheck {
                         Text("Checked \(lastCheck, format: .relative(presentation: .named))")

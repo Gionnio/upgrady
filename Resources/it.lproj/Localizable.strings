@@ -152,3 +152,11 @@
 "Homebrew stopped making progress and was stopped. Try again." = "Homebrew non faceva più progressi ed è stato interrotto. Riprova.";
 "The update stopped making progress. Try again." = "L'aggiornamento non faceva più progressi. Riprova.";
 "Homebrew did not install a newer version yet. Try again after the next check." = "Homebrew non ha ancora installato una versione più recente. Riprova dopo il prossimo controllo.";
+"Updating %lld of %lld…" = "Aggiornamento %lld di %lld…";
+"Updates are in progress" = "Ci sono aggiornamenti in corso";
+"Quitting Upgrady now stops them." = "Se chiudi Upgrady adesso, si interrompono.";
+"Keep Updating" = "Continua ad aggiornare";
+"Quit Anyway" = "Esci comunque";
+"Some of these apps are open" = "Alcune di queste app sono aperte";
+"To update them Upgrady closes them and opens them again: %@." = "Per aggiornarle Upgrady le chiude e le riapre: %@.";
+"Skip Open Apps" = "Salta le app aperte";
