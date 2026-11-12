@@ -261,6 +261,29 @@ final class UpdateCenter: ObservableObject {
         }
     }
 
+    /// One `brew upgrade --cask` with the watchdog and download progress, logged.
+    private func upgradeCask(_ name: String, status: AppStatus, runner: BrewRunner) async -> BrewRunner.Output {
+        ActivityLog.write("brew upgrade --cask \(name) started")
+        let watchdog = BrewWatchdog(timeout: brewStallTimeout)
+        let progress = status.cask.map { cask in
+            CaskDownloadProgress(runner: runner, cask: cask, watchdog: watchdog) { fraction in
+                Task { @MainActor in
+                    UpdateCenter.shared.operations[status.id] = fraction >= 1 ? .installing : .downloading(fraction)
+                }
+            }
+        }
+        progress?.start()
+        let output = await runner.run(["upgrade", "--cask", name], watchdog: watchdog) { [weak self] text in
+            Task { @MainActor in self?.brewLog += text }
+        }
+        progress?.stop()
+        ActivityLog.write("brew upgrade --cask \(name) ended with status \(output.status)\(output.stalled ? " (stopped: no progress for \(Int(brewStallTimeout))s)" : "")")
+        if !output.succeeded {
+            ActivityLog.write("brew output:\n" + output.text.split(separator: "\n").suffix(20).joined(separator: "\n"))
+        }
+        return output
+    }
+
     /// Reads an updated app again, so it leaves the list of updates right away instead of at the end of the run.
     private func refreshStatus(of status: AppStatus) {
         guard let index = statuses.firstIndex(where: { $0.id == status.id }),
@@ -309,24 +332,13 @@ final class UpdateCenter: ObservableObject {
             if lastBrewUpdate.map({ Date().timeIntervalSince($0) > brewFreshness }) ?? true {
                 await updateBrew(runner)
             }
-            ActivityLog.write("brew upgrade --cask \(name) started")
             let wasRunning = quitRunningApp(status.app)
-            let watchdog = BrewWatchdog(timeout: brewStallTimeout)
-            let progress = status.cask.map { cask in
-                CaskDownloadProgress(runner: runner, cask: cask, watchdog: watchdog) { fraction in
-                    Task { @MainActor in
-                        UpdateCenter.shared.operations[status.id] = fraction >= 1 ? .installing : .downloading(fraction)
-                    }
-                }
-            }
-            progress?.start()
-            let output = await runner.run(["upgrade", "--cask", name], watchdog: watchdog) { [weak self] text in
-                Task { @MainActor in self?.brewLog += text }
-            }
-            progress?.stop()
-            ActivityLog.write("brew upgrade --cask \(name) ended with status \(output.status)\(output.stalled ? " (stopped: no progress for \(Int(brewStallTimeout))s)" : "")")
-            if !output.succeeded {
-                ActivityLog.write("brew output:\n" + output.text.split(separator: "\n").suffix(20).joined(separator: "\n"))
+            // A download that stalls is often a passing network hiccup: try once more before giving up.
+            var output = await upgradeCask(name, status: status, runner: runner)
+            if output.stalled {
+                ActivityLog.write("brew upgrade --cask \(name) stalled: trying once more")
+                operations[status.id] = .preparing
+                output = await upgradeCask(name, status: status, runner: runner)
             }
             if wasRunning {
                 NSWorkspace.shared.openApplication(at: status.app.url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
